@@ -43,6 +43,9 @@ const awsConfig = {
   }
 };
 
+console.log("Amplify configuration object being passed:", JSON.stringify(awsConfig, null, 2));
+Amplify.configure(awsConfig);
+
 Amplify.configure(awsConfig); // Initializes the Amplify library with your AWS service configurations
 
 
@@ -249,7 +252,7 @@ const App = () => {
         setIsLoadingAuth(false);
         return;
        }
-       await Amplify.Auth.federatedSignIn({ provider: 'COGNITO' });
+       await Amplify.Auth.federatedSignIn({ provider: 'Cognito' });
        showMessage(`Redirecting to Cognito for ${role} login...`, 'info');
      } catch (error) {
        console.error("Cognito Login Error:", error);
