@@ -1,7 +1,7 @@
 import React, { useState, useEffect, createContext, useContext, useCallback } from 'react';
 import { initializeApp } from 'firebase/app';
 import { getAuth, signInAnonymously, signInWithCustomToken, onAuthStateChanged } from 'firebase/auth';
-import { Amplify } from 'aws-amplify'; // ONLY import Amplify from the main package now
+import { Amplify } from 'aws-amplify';
 
 // Lucide React for icons
 import { Calendar, MapPin, Ticket, Users, Edit, Trash2, CheckCircle, XCircle, Info, PlusCircle, Save, X, Eye, BookOpen, Clock, Globe, Search } from 'lucide-react';
@@ -15,7 +15,7 @@ const awsConfig = {
     userPoolId: 'us-east-1_6xvOeaPY9', // e.g., 'us-east-1_XXXXX'
     userPoolWebClientId: '3pg41qbvh2q6u4c589re1m65mi', // e.g., 'YYYYYYY'
     oauth: {
-      domain: 'https://us-east-1-6xvoeapy9.auth.us-east-1.amazoncognito.com', // e.g., 'your-event-app-domain.auth.us-east-1.amazoncognito.com'
+      domain: 'https://event-ticket-booking-application.auth.us-east-1.amazoncognito.com', // e.g., 'your-event-app-domain.auth.us-east-1.amazoncognito.com'
       scope: ['email', 'openid', 'profile', 'aws.cognito.signin.user.admin'],
       redirectSignIn: 'http://localhost:5173', // Your local frontend URL (or your deployed Amplify URL)
       redirectSignOut: 'http://localhost:5173', // Your local frontend URL (or your deployed Amplify URL)
@@ -30,10 +30,13 @@ const awsConfig = {
         region: 'us-east-1', // Must match your API Gateway region
         custom_header: async () => {
           try {
-            // Access Auth via Amplify.Auth
-            const session = await Amplify.Auth.currentSession();
+            // This function dynamically fetches the current session's JWT token
+            // and includes it in the Authorization header for API Gateway requests.
+            const session = await Auth.currentSession();
             return { Authorization: `Bearer ${session.getAccessToken().getJwtToken()}` };
           } catch (e) {
+            // If no active session (user not logged in), return empty headers.
+            // API calls to unprotected endpoints will still work; protected ones will fail (401/403).
             console.warn("No active session, API call will be unauthenticated:", e);
             return {};
           }
@@ -86,6 +89,8 @@ const apiService = {
 
   // Event Management API calls
   getEvents: async () => {
+    // The Lambda function handles filtering by organizer ID or published status based on the JWT claim.
+    // So, the frontend always calls the same /events path.
     return apiService.callApi('GET', '/events');
   },
   createEvent: async (eventData) => {
@@ -103,9 +108,11 @@ const apiService = {
     return apiService.callApi('POST', '/register', registrationData);
   },
   getRegistrationsForUser: async () => {
+    // Fetches registrations for the currently authenticated user
     return apiService.callApi('GET', '/registrations/me');
   },
   getRegistrationsForEvent: async (eventId) => {
+    // Fetches registrations for a specific event (only accessible by organizer)
     return apiService.callApi('GET', `/events/${eventId}/registrations`);
   },
 
@@ -120,6 +127,7 @@ const apiService = {
 const MessageModal = ({ message, type, onClose }) => {
   if (!message) return null; // Don't render if no message
 
+  // Determine styling based on message type
   const bgColor = type === 'success' ? 'bg-green-50' : 'bg-red-50';
   const borderColor = type === 'success' ? 'border-green-400' : 'border-red-400';
   const textColor = type === 'success' ? 'text-green-800' : 'text-red-800';
@@ -178,8 +186,12 @@ const App = () => {
 
   useEffect(() => {
     // --- Firebase Initialization for Canvas Environment ---
-    const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+    // This block is specifically for the Canvas environment's internal Firebase authentication.
+    // It's required for the Canvas to manage the user session within the iframe.
+    // The core application authentication and authorization will rely on AWS Cognito/Amplify.
+    const appId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id'; // Provided by Canvas
     const firebaseConfig = typeof __firebase_config !== 'undefined' && __firebase_config ? JSON.parse(__firebase_config) : {
+      // Dummy config for local development if __firebase_config is not present
       apiKey: "dummy-api-key",
       authDomain: "dummy-auth-domain",
       projectId: "dummy-project-id",
@@ -188,102 +200,100 @@ const App = () => {
       appId: "dummy-app-id"
     };
 
-    const app = initializeApp(firebaseConfig);
-    const firebaseAuth = getAuth(app);
+    const app = initializeApp(firebaseConfig); // Initialize Firebase
+    const firebaseAuth = getAuth(app); // Get Firebase Auth instance
 
+    // Firebase Auth State Listener for Canvas environment
     const unsubscribeFirebaseAuth = onAuthStateChanged(firebaseAuth, async (user) => {
       if (user) {
-        setUserId(user.uid);
+        setUserId(user.uid); // Set userId from Firebase for environment tracking
+        // Attempt to get AWS Cognito user info after Firebase auth is ready
         try {
-          // Access Auth via Amplify.Auth
-          const amplifyUser = await Amplify.Auth.currentAuthenticatedUser({ bypassCache: true });
+          const amplifyUser = await Auth.currentAuthenticatedUser({ bypassCache: true }); // Get current Amplify (Cognito) authenticated user
           const groups = amplifyUser.signInUserSession.accessToken.payload['cognito:groups'] || [];
-          let role = 'attendee';
-          if (groups.includes('Organizers')) {
+          let role = 'attendee'; // Default role
+          if (groups.includes('Organizers')) { // Check if user is in 'Organizers' Cognito group
             role = 'organizer';
           }
           setCurrentUser({
-            uid: amplifyUser.attributes.sub,
+            uid: amplifyUser.attributes.sub, // Use Cognito 'sub' attribute as primary user ID
             email: amplifyUser.attributes.email,
             role: role,
-            amplifyUser: amplifyUser
+            amplifyUser: amplifyUser // Store full Amplify user object for later use if needed
           });
         } catch (error) {
+          // If no Cognito user or not authenticated with Cognito yet, log warning
           console.warn("No Cognito user found or not authenticated with Cognito. Falling back to Firebase ID.", error);
-          setCurrentUser({ uid: user.uid, email: user.email, role: null });
+          setCurrentUser({ uid: user.uid, email: user.email, role: null }); // Set user with Firebase ID, no specific role yet
         }
       } else {
+        // No Firebase user (or logged out)
         setCurrentUser(null);
         setUserId(null);
       }
-      setIsLoadingAuth(false);
+      setIsLoadingAuth(false); // Authentication loading complete
     });
 
+    // Sign in anonymously to Firebase if no custom token is provided (as required by Canvas environment)
     const initialFirebaseAuth = async () => {
       try {
         const initialToken = typeof __initial_auth_token !== 'undefined' ? __initial_auth_token : null;
         if (initialToken) {
-          await signInWithCustomToken(firebaseAuth, initialToken);
+          await signInWithCustomToken(firebaseAuth, initialToken); // Sign in with custom token if provided
         } else {
-          await signInAnonymously(firebaseAuth);
+          await signInAnonymously(firebaseAuth); // Otherwise, sign in anonymously
         }
       } catch (error) {
         console.error("Firebase Anonymous Auth error:", error);
       }
     };
-    initialFirebaseAuth();
+    initialFirebaseAuth(); // Execute initial Firebase authentication
     // --- End Firebase Initialization ---
 
     return () => {
-      unsubscribeFirebaseAuth();
+      unsubscribeFirebaseAuth(); // Clean up Firebase auth listener on component unmount
     };
-  }, []);
+  }, []); // Empty dependency array means this effect runs once on mount
 
   // --- AWS Cognito Authentication Functions ---
   const handleCognitoLogin = async (role) => {
     try {
-      setIsLoadingAuth(true);
-      if (!Amplify.Auth) { // Add this check
-        console.error("Amplify.Auth is not initialized.");
-        showMessage("Authentication service is not ready. Please try again or refresh.", "error");
-        setIsLoadingAuth(false);
-        return;
-       }
-       await Amplify.Auth.federatedSignIn({ provider: 'COGNITO' });
-       showMessage(`Redirecting to Cognito for ${role} login...`, 'info');
-     } catch (error) {
-       console.error("Cognito Login Error:", error);
-       showMessage("Failed to initiate login. Please ensure Cognito config is correct.", "error");
-     } finally {
-       setIsLoadingAuth(false);
-     }
+      setIsLoadingAuth(true); // Start loading state
+      // This will redirect to Cognito Hosted UI for login/signup.
+      // After successful login, Cognito redirects back to the configured redirectSignIn URL.
+      // Amplify's Auth listener (part of Amplify.configure) will then detect the new session.
+      await Auth.federatedSignIn({ provider: 'COGNITO' }); // Initiates the Cognito Hosted UI flow
+      showMessage(`Redirecting to Cognito for ${role} login...`, 'info');
+    } catch (error) {
+      console.error("Cognito Login Error:", error);
+      showMessage("Failed to initiate login. Please ensure Cognito config is correct.", "error");
+    } finally {
+      setIsLoadingAuth(false); // End loading state
+    }
   };
 
   const handleCognitoLogout = async () => {
     try {
-      setIsLoadingAuth(true);
-      if (!Amplify.Auth) { // Add this check
-        console.error("Amplify.Auth is not initialized for logout.");
-        showMessage("Authentication service is not ready for logout. Please try again or refresh.", "error");
-        setIsLoadingAuth(false);
-        return;
-       }
-       await Amplify.Auth.signOut();
-       showMessage("You have been logged out from AWS Cognito.", "success");
-       const amplifyUser = await Amplify.Auth.currentAuthenticatedUser({ bypassCache: true }).catch(() => null);
-       if (!amplifyUser) {
-         setCurrentUser(null);
-       }
-     } catch (error) {
-       console.error("Cognito Logout Error:", error);
-       showMessage("Failed to log out from Cognito.", "error");
-     } finally {
-       setIsLoadingAuth(false);
-     }
+      setIsLoadingAuth(true); // Start loading state
+      await Auth.signOut(); // Signs out from Cognito
+      showMessage("You have been logged out from AWS Cognito.", "success");
+      // Re-evaluate currentUser after Cognito signOut to reflect no active session
+      const amplifyUser = await Auth.currentAuthenticatedUser({ bypassCache: true }).catch(() => null);
+      if (!amplifyUser) { // If no Amplify user found after signOut
+        setCurrentUser(null); // Clear current user
+        // setCurrentView('home'); // Optionally return to home view
+      }
+    } catch (error) {
+      console.error("Cognito Logout Error:", error);
+      showMessage("Failed to log out from Cognito.", "error");
+    } finally {
+      setIsLoadingAuth(false); // End loading state
+    }
   };
   // --- End AWS Cognito Authentication Functions ---
 
 
+  // Conditional rendering based on authentication state and user role
   const renderContent = () => {
     if (isLoadingAuth) {
       return (
@@ -294,6 +304,7 @@ const App = () => {
       );
     }
 
+    // If not authenticated with Cognito, show login options
     if (!currentUser || !currentUser.amplifyUser) {
       return (
         <div className="flex flex-col items-center justify-center min-h-screen bg-gradient-to-br from-gray-100 to-gray-200 p-4 text-center">
@@ -315,7 +326,7 @@ const App = () => {
               Login as Attendee
             </button>
           </div>
-          {userId && (
+          {userId && ( // Display Firebase user ID for debugging in Canvas environment
             <p className="mt-12 text-sm text-gray-500">
               Canvas environment user ID: <span className="font-mono bg-gray-200 px-2 py-1 rounded-md text-xs text-gray-700">{userId}</span><br/>
               Please log in with Cognito to access app features.
@@ -325,6 +336,7 @@ const App = () => {
       );
     }
 
+    // After Cognito authentication, route based on role
     if (currentUser.role === 'organizer') {
       return (
         <OrganizerDashboard onLogout={handleCognitoLogout} userId={currentUser.uid} showMessage={showMessage} />
@@ -334,6 +346,7 @@ const App = () => {
         <AttendeeDashboard onLogout={handleCognitoLogout} userId={currentUser.uid} showMessage={showMessage} />
       );
     } else {
+      // Fallback if role is not explicitly set or recognized AFTER Cognito auth
       return (
         <div className="flex flex-col items-center justify-center min-h-screen bg-gray-100 p-4">
           <h1 className="text-4xl font-bold text-gray-800 mb-8">Welcome, {currentUser.email || 'User'}!</h1>
@@ -362,6 +375,7 @@ const App = () => {
   );
 };
 
+// Organizer Dashboard Component (remains largely the same, integrating apiService)
 const OrganizerDashboard = ({ onLogout, userId, showMessage }) => {
   const [events, setEvents] = useState([]);
   const [newEvent, setNewEvent] = useState({ name: '', date: '', time: '', location: '', description: '', ticketTypes: [{ id: `tkt-${Date.now()}-0`, name: 'Standard', price: '', capacity: '' }] });
@@ -371,12 +385,14 @@ const OrganizerDashboard = ({ onLogout, userId, showMessage }) => {
   const fetchOrganizerEvents = useCallback(async () => {
     setLoading(true);
     try {
-      const data = await apiService.getEvents(); // No 'organizer' role param needed here as lambda determines from JWT
+      // Use apiService to fetch events. Lambda will filter by organizer ID.
+      const data = await apiService.getEvents('organizer');
+      // Ensure prices and capacities are numbers after fetching (DynamoDB stores as Decimal, Lambda converts to float for JSON)
       const processedData = data.map(event => ({
         ...event,
         ticketTypes: event.ticketTypes.map(tt => ({
           ...tt,
-          price: Number(tt.price),
+          price: Number(tt.price), // Convert to Number for JS calculations/display
           capacity: Number(tt.capacity),
           sold: Number(tt.sold)
         }))
@@ -391,7 +407,7 @@ const OrganizerDashboard = ({ onLogout, userId, showMessage }) => {
   }, [showMessage]);
 
   useEffect(() => {
-    if (userId) {
+    if (userId) { // Fetch only if user is authenticated (Cognito ID is present)
       fetchOrganizerEvents();
     }
   }, [userId, fetchOrganizerEvents]);
@@ -424,13 +440,14 @@ const OrganizerDashboard = ({ onLogout, userId, showMessage }) => {
     e.preventDefault();
     setLoading(true);
     try {
+      // Convert numbers in ticketTypes to string for sending to Python Lambda's Decimal handling
       const eventDataToSend = {
         ...newEvent,
         ticketTypes: newEvent.ticketTypes.map(tt => ({
           ...tt,
-          price: String(tt.price),
-          capacity: Number(tt.capacity),
-          sold: Number(tt.sold || 0)
+          price: String(tt.price), // Convert number to string for precise Decimal conversion in Python Lambda
+          capacity: Number(tt.capacity), // Ensure capacity is number
+          sold: Number(tt.sold || 0) // Ensure sold is a number, default to 0
         }))
       };
 
@@ -451,7 +468,7 @@ const OrganizerDashboard = ({ onLogout, userId, showMessage }) => {
           showMessage('Failed to create event.', 'error');
         }
       }
-      fetchOrganizerEvents();
+      fetchOrganizerEvents(); // Refresh event list after CUD operation
     } catch (error) {
       console.error('Error saving event:', error);
       showMessage(`An error occurred while saving the event: ${error.message}`, 'error');
@@ -461,26 +478,27 @@ const OrganizerDashboard = ({ onLogout, userId, showMessage }) => {
   };
 
   const handleEditClick = (event) => {
+    // Populate form with event data for editing
     setNewEvent({
       ...event,
       ticketTypes: event.ticketTypes.map(tt => ({
         ...tt,
-        price: Number(tt.price),
+        price: Number(tt.price), // Convert back to Number for form input type="number"
         capacity: Number(tt.capacity),
         sold: Number(tt.sold)
       }))
     });
     setEditingEventId(event.id);
-    window.scrollTo({ top: 0, behavior: 'smooth' });
+    window.scrollTo({ top: 0, behavior: 'smooth' }); // Scroll to form for convenience
   };
 
   const handleDeleteEvent = async (eventId) => {
     if (window.confirm('Are you sure you want to delete this event? This action cannot be undone.')) {
       setLoading(true);
       try {
-        await apiService.deleteEvent(eventId);
+        await apiService.deleteEvent(eventId); // Call API to delete event
         showMessage('Event deleted successfully!', 'success');
-        fetchOrganizerEvents();
+        fetchOrganizerEvents(); // Refresh event list
       } catch (error) {
         console.error('Error deleting event:', error);
         showMessage(`Failed to delete event: ${error.message}`, 'error');
@@ -494,9 +512,9 @@ const OrganizerDashboard = ({ onLogout, userId, showMessage }) => {
     setLoading(true);
     const newStatus = event.status === 'published' ? 'draft' : 'published';
     try {
-      await apiService.updateEvent(event.id, { status: newStatus });
+      await apiService.updateEvent(event.id, { status: newStatus }); // Update event status
       showMessage(`Event status updated to ${newStatus}!`, 'success');
-      fetchOrganizerEvents();
+      fetchOrganizerEvents(); // Refresh event list
     } catch (error) {
       console.error('Error updating status:', error);
       showMessage(`An error occurred while updating event status: ${error.message}`, 'error');
@@ -707,6 +725,7 @@ const OrganizerDashboard = ({ onLogout, userId, showMessage }) => {
   );
 };
 
+// Event Card Component for Organizer Dashboard
 const EventCard = ({ event, onEdit, onDelete, onToggleStatus, showMessage }) => {
   const [showRegistrants, setShowRegistrants] = useState(false);
   const [registrants, setRegistrants] = useState([]);
@@ -715,7 +734,7 @@ const EventCard = ({ event, onEdit, onDelete, onToggleStatus, showMessage }) => 
   const fetchRegistrants = useCallback(async () => {
     setLoadingRegistrants(true);
     try {
-      const data = await apiService.getRegistrationsForEvent(event.id);
+      const data = await apiService.getRegistrationsForEvent(event.id); // Call API to get event registrants
       setRegistrants(data);
     } catch (error) {
       console.error(`Error fetching registrants for event ${event.id}:`, error);
@@ -727,11 +746,12 @@ const EventCard = ({ event, onEdit, onDelete, onToggleStatus, showMessage }) => 
 
   const handleViewRegistrantsClick = () => {
     setShowRegistrants(!showRegistrants);
-    if (!showRegistrants) {
+    if (!showRegistrants) { // If opening, fetch data
       fetchRegistrants();
     }
   };
 
+  // Calculate total capacity and sold tickets for display
   const totalCapacity = event.ticketTypes.reduce((sum, tt) => sum + Number(tt.capacity), 0);
   const totalSold = event.ticketTypes.reduce((sum, tt) => sum + Number(tt.sold), 0);
   const ticketsRemaining = totalCapacity - totalSold;
@@ -814,6 +834,7 @@ const EventCard = ({ event, onEdit, onDelete, onToggleStatus, showMessage }) => 
 };
 
 
+// Attendee Dashboard Component (remains largely the same, integrating apiService)
 const AttendeeDashboard = ({ onLogout, userId, showMessage }) => {
   const [events, setEvents] = useState([]);
   const [myRegistrations, setMyRegistrations] = useState([]);
@@ -825,7 +846,8 @@ const AttendeeDashboard = ({ onLogout, userId, showMessage }) => {
   const fetchAvailableEvents = useCallback(async () => {
     setLoading(true);
     try {
-      const data = await apiService.getEvents(); // No 'attendee' role param needed as lambda determines from JWT
+      // Use apiService to fetch events. Lambda will filter for published events.
+      const data = await apiService.getEvents('attendee');
       const processedData = data.map(event => ({
         ...event,
         ticketTypes: event.ticketTypes.map(tt => ({
@@ -847,7 +869,7 @@ const AttendeeDashboard = ({ onLogout, userId, showMessage }) => {
   const fetchMyRegistrations = useCallback(async () => {
     setLoading(true);
     try {
-      const data = await apiService.getRegistrationsForUser();
+      const data = await apiService.getRegistrationsForUser(); // Call API to get user's registrations
       setMyRegistrations(data);
     } catch (error) {
       console.error('Error fetching my registrations:', error);
@@ -855,10 +877,10 @@ const AttendeeDashboard = ({ onLogout, userId, showMessage }) => {
     } finally {
       setLoading(false);
     }
-  }, [showMessage]);
+  }, [showMessage]); // userId is implicitly handled by the JWT token sent by Amplify
 
   useEffect(() => {
-    if (userId) {
+    if (userId) { // Fetch only if user is authenticated (Cognito ID is present)
       fetchAvailableEvents();
       fetchMyRegistrations();
     }
@@ -886,18 +908,18 @@ const AttendeeDashboard = ({ onLogout, userId, showMessage }) => {
         eventId: selectedEventForDetails.id,
         ...registrationDetails,
       };
-      const result = await apiService.registerForEvent(registrationData);
+      const result = await apiService.registerForEvent(registrationData); // Call API to register
       if (result.message) {
         showMessage('Registration successful! Please download your ticket.', 'success');
         if (result.ticketUrl) {
-          window.open(result.ticketUrl, '_blank');
+          window.open(result.ticketUrl, '_blank'); // Open ticket in new tab if URL provided
         } else {
           showMessage('Ticket generated, but no download link returned. Please check your registrations.', 'info');
         }
         setRegistrationDetails({ attendeeName: '', attendeeEmail: '', ticketTypeId: '' });
-        setSelectedEventForDetails(null);
-        fetchMyRegistrations();
-        fetchAvailableEvents();
+        setSelectedEventForDetails(null); // Close detail view after registration
+        fetchMyRegistrations(); // Refresh my registrations to show new ticket
+        fetchAvailableEvents(); // Update event capacities displayed
       } else {
         showMessage(`Failed to register: ${result.error || 'Unknown error.'}`, 'error');
       }
@@ -1093,6 +1115,7 @@ const AttendeeDashboard = ({ onLogout, userId, showMessage }) => {
   );
 };
 
+// Attendee Event Card Component
 const AttendeeEventCard = ({ event, onSelectEvent, isSelected }) => {
   const availableTickets = event.ticketTypes.reduce((sum, tt) => sum + (Number(tt.capacity) - Number(tt.sold)), 0);
   const isSoldOut = availableTickets <= 0;
